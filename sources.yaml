@@ -1,0 +1,16 @@
+blocked_content:
+  - celebrity gossip
+  - sports betting
+  - \bporn\b
+
+categories:
+  tech_news:
+    rss:
+      - https://techcrunch.com/feed/
+      - https://news.ycombinator.com/rss
+    urls:
+      - https://example.com/daily-blog-post
+  ai_updates:
+    rss:
+      - https://openai.com/blog/rss.xml
+    urls: []
