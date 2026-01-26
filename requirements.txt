@@ -1,3 +1,5 @@
+css
+lxml[html_clean]
 pyyaml
 feedparser
 google-generativeai
