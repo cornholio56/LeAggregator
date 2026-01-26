@@ -1,0 +1,8 @@
+pyyaml
+feedparser
+google-generativeai
+PyRSS2Gen
+requests
+newspaper3k
+python-dateutil
+lxml
