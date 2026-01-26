@@ -1,5 +1,3 @@
-css
-lxml[html_clean]
 pyyaml
 feedparser
 google-generativeai
@@ -7,4 +5,4 @@ PyRSS2Gen
 requests
 newspaper3k
 python-dateutil
-lxml
+lxml_html_clean
