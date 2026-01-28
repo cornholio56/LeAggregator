@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 CONFIG_PATH = "sources.yaml"
 STATE_PATH = "read_log.txt"
 
-def load_state(): [cite: 12]
+def load_state():
     if not os.path.exists(STATE_PATH):
         return datetime.datetime.min.replace(tzinfo=datetime.timezone.utc)
     try:
@@ -36,7 +36,7 @@ def save_state():
     with open(STATE_PATH, "w") as f:
         f.write(now)
 
-def load_existing_links(xml_file): [cite: 13, 14]
+def load_existing_links(xml_file):
     seen = set()
     if not os.path.exists(xml_file):
         return seen
@@ -58,7 +58,7 @@ def is_blocked(content, patterns):
         return False
     return any(p.search(content) for p in patterns)
 
-def fetch_url_content(url): [cite: 15]
+def fetch_url_content(url):
     try:
         article = Article(url, request_timeout=15)
         article.download()
@@ -68,10 +68,18 @@ def fetch_url_content(url): [cite: 15]
         return None, None
 
 def main():
+    if not os.path.exists(CONFIG_PATH):
+        logger.error(f"Configuration file {CONFIG_PATH} not found.")
+        return
+
     with open(CONFIG_PATH, "r") as f:
         config = yaml.safe_load(f)
 
-    # Initialize the NEW Gemini Client
+    # Use the modern google-genai client [cite: 2]
+    if "GEMINI_API_KEY" not in os.environ:
+        logger.error("GEMINI_API_KEY environment variable not set.")
+        return
+        
     client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
     blocked = [re.compile(p, re.IGNORECASE) for p in config.get("blocked_content", [])]
     last_run = load_state()
@@ -81,7 +89,7 @@ def main():
         seen_links = load_existing_links(output_file)
         candidates = []
 
-        # Process RSS Feeds [cite: 16, 17, 18, 19]
+        # Process RSS
         for rss_url in sources.get("rss", []):
             feed = feedparser.parse(rss_url)
             for entry in feed.entries:
@@ -103,7 +111,7 @@ def main():
                         "content": content[:3000]
                     })
 
-        # Process Direct URLs [cite: 20, 21]
+        # Process Direct URLs
         for url in sources.get("urls", []):
             if url in seen_links:
                 continue
@@ -118,12 +126,8 @@ def main():
         if not candidates:
             continue
 
-        # AI Summarization with native JSON mode 
-        prompt = (
-            f"Summarize these articles into a JSON list. "
-            f"Each item MUST have 'title', 'link', and 'summary' keys. "
-            f"Articles:\n{json.dumps(candidates)}"
-        )
+        # AI Summarization with native JSON mode
+        prompt = f"Summarize these articles into a JSON list. Each item MUST have 'title', 'link', and 'summary' keys:\n{json.dumps(candidates)}"
         
         try:
             response = client.models.generate_content(
@@ -134,26 +138,24 @@ def main():
                 }
             )
             ai_results = json.loads(response.text)
-        except Exception as e: [cite: 23]
-            logger.error(f"Failed to generate or parse AI response for {cat_name}: {e}")
+        except Exception as e:
+            logger.error(f"Failed to generate AI response for {cat_name}: {e}")
             continue
 
-        # Build the RSS items [cite: 24, 25]
         rss_items = []
         now = datetime.datetime.now(datetime.timezone.utc)
 
         for r in ai_results:
             rss_items.append(
                 PyRSS2Gen.RSSItem(
-                    title=r["title"],
-                    link=r["link"],
-                    description=r["summary"],
-                    guid=PyRSS2Gen.Guid(r["link"]),
+                    title=r.get("title", "No Title"),
+                    link=r.get("link", ""),
+                    description=r.get("summary", "No summary available."),
+                    guid=PyRSS2Gen.Guid(r.get("link", "")),
                     pubDate=now
                 )
             )
 
-        # Write to file [cite: 26]
         rss = PyRSS2Gen.RSS2(
             title=f"AI News - {cat_name}",
             link="https://github.com/USER/REPO",
