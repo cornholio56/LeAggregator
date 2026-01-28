@@ -1,6 +1,6 @@
 pyyaml
 feedparser
-google-generativeai
+google-genai
 PyRSS2Gen
 requests
 newspaper3k
