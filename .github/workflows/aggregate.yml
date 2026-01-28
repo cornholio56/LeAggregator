@@ -35,23 +35,20 @@ jobs:
           git config user.name "github-actions"
           git config user.email "actions@github.com"
           
-          # Always add the state file
+          # 1. Stage the state file (this usually exists)
           git add read_log.txt
           
-          # Only add XML files if they exist to avoid 'pathspec' error
+          # 2. Use a conditional check for XML files
+          # This prevents the "pathspec" error if no news was generated
           if ls *.xml >/dev/null 2>&1; then
             git add *.xml
           fi
 
-          # Only commit if changes are actually staged
+          # 3. Only commit if there are actually changes staged
+          # This prevents the "nothing to commit" error
           if ! git diff --cached --quiet; then
             git commit -m "Update RSS feeds [skip ci]"
             git push
           else
-            echo "No changes to commit."
+            echo "No new news found; nothing to update."
           fi
-          git config user.email "actions@github.com"
-          git add *.xml read_log.txt
-          # The next line prevents errors if there are no new news items
-          git commit -m "Update RSS feeds [skip ci]" || echo "No changes to commit"
-          git push
