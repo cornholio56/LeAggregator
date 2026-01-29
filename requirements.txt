@@ -6,4 +6,4 @@ trafilatura
 newspaper3k
 crawl4ai
 playwright
-google-generativeai
+google-generativeai>=0.8.0
