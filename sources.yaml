@@ -3,7 +3,7 @@ content_filters:
     - "Sports: Any professional or amateur sports news."
     - "Tabloid/Gossip: Celebrity or sensationalist content."
     - "Tragedy/Crime: Individual crimes or accidents."
-    - "Low-Value: Listicles, ads, press releases."
+    - "Low-Value: Listicles, ads."
 
 categories:
   general:
@@ -11,6 +11,7 @@ categories:
       - https://www.index.hr/rss
       - https://247newsaroundtheworld.com/feed/
       - https://abcnews.go.com/abcnews/internationalheadlines
+      - https://www.nacional.hr/feed/
     urls: []
 
   culture:
