@@ -8,8 +8,9 @@ content_filters:
 categories:
   general:
     rss:
-      - https://news.ycombinator.com/rss
-      - https://www.reddit.com/r/worldnews/.rss
+      - https://www.index.hr/rss
+      - https://247newsaroundtheworld.com/feed/
+      - https://abcnews.go.com/abcnews/internationalheadlines
     urls: []
 
   culture:
