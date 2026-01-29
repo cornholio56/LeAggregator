@@ -1,54 +1,45 @@
-name: AI News Aggregator
+name: AI News Aggregator 2026
 
 on:
   schedule:
     - cron: "0 */4 * * *"
   workflow_dispatch:
 
-permissions:
-  contents: write
-
 jobs:
   aggregate:
     runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+    permissions:
+      contents: write
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: pip
 
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run Aggregator Script
+      - name: Install Playwright
+        run: |
+          python -m playwright install --with-deps chromium
+
+      - name: Run aggregator
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: python aggregator.py
 
-      - name: Commit and Push changes
+      - name: Commit RSS updates
         run: |
-          git config user.name "github-actions"
-          git config user.email "actions@github.com"
-          
-          # 1. Stage the state file (this usually exists)
-          git add read_log.txt
-          
-          # 2. Use a conditional check for XML files
-          # This prevents the "pathspec" error if no news was generated
-          if ls *.xml >/dev/null 2>&1; then
-            git add *.xml
-          fi
-
-          # 3. Only commit if there are actually changes staged
-          # This prevents the "nothing to commit" error
-          if ! git diff --cached --quiet; then
-            git commit -m "Update RSS feeds [skip ci]"
-            git push
-          else
-            echo "No new news found; nothing to update."
-          fi
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+          git add *.xml read_log.txt
+          git diff --quiet && git diff --staged --quiet || \
+            git commit -m "Update RSS feeds: $(date +'%Y-%m-%d %H:%M')"
+          git push
