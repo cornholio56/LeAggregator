@@ -6,6 +6,7 @@ import json
 import logging
 import datetime
 import hashlib
+import html  # ← Added for escaping
 import PyRSS2Gen
 import trafilatura
 import xml.etree.ElementTree as ET
@@ -39,7 +40,7 @@ RULES:
 - Output only high-confidence themes (prefer omission over weak or uncertain ones).
 - Be factual, analytical, and neutral; no speculation or opinion.
 - Titles: 5–10 words, concise and thematic.
-- Use this exact HTML format for each Story's content:
+- Use this exact HTML format for each Story's content (repeat blocks for sub-themes):
 
 <div>
   <p>Intro paragraph (2–3 sentences explaining relevance and context)</p>
@@ -135,7 +136,6 @@ async def fetch_url_content(url: str) -> str | None:
                 return text
         except:
             pass
-
         try:
             article = Article(url, fetch_images=False)
             article.download()
@@ -144,7 +144,6 @@ async def fetch_url_content(url: str) -> str | None:
                 return article.text
         except:
             pass
-
         try:
             async with AsyncWebCrawler(config=BrowserConfig(headless=True, verbose=False)) as crawler:
                 result = await crawler.arun(
@@ -155,7 +154,7 @@ async def fetch_url_content(url: str) -> str | None:
                     return result.markdown
         except:
             pass
-
+    logger.warning(f"Failed to fetch content from {url} after 3 attempts")
     return None
 
 def get_ai_response(client: GenerativeModel, prompt: str) -> dict:
@@ -212,14 +211,31 @@ def update_xml_feed(category: str, new_themes: list, now: datetime.datetime):
     items = load_existing_items(category, cutoff)
 
     for theme in new_themes:
-        content_hash = hashlib.sha256(theme['expanded_html'].encode('utf-8')).hexdigest()
-        guid_str = f"{category}-{content_hash[:16]}"
+        # Escape potentially dangerous characters in user/AI-generated HTML content
+        safe_title = html.escape(theme["title"])
+        safe_html = theme["expanded_html"]  # Assume AI outputs safe HTML; if not, escape inner text too
+        content_hash = hashlib.sha256(safe_html.encode('utf-8')).hexdigest()
+        guid_str = f"{category}-{content_hash}"
+
         items.append(
             PyRSS2Gen.RSSItem(
-                title=theme["title"],
+                title=safe_title,
                 link=BASE_REPO_URL,
-                description=theme["expanded_html"],
+                description=safe_html,
                 guid=PyRSS2Gen.Guid(guid_str, isPermaLink=False),
+                pubDate=now
+            )
+        )
+
+    # Fallback if no items at all (prevents "empty feed" rejection)
+    if not items:
+        logger.info(f"No stories for {category}; adding placeholder item")
+        items.append(
+            PyRSS2Gen.RSSItem(
+                title="No recent thematic stories",
+                link=BASE_REPO_URL,
+                description="<div><p>No new high-confidence AI-curated themes in the last run. Check back after the next update (every 4 hours).</p></div>",
+                guid=PyRSS2Gen.Guid(f"{category}-placeholder-{now.isoformat()}", isPermaLink=False),
                 pubDate=now
             )
         )
@@ -234,8 +250,22 @@ def update_xml_feed(category: str, new_themes: list, now: datetime.datetime):
         items=items
     )
 
-    with open(filename, "w", encoding="utf-8") as f:
-        rss.write_xml(f)
+    # Write to StringIO first to control XML declaration
+    from io import StringIO
+    f = StringIO()
+    rss.write_xml(f, encoding='utf-8')  # Try utf-8 here
+    xml_str = f.getvalue()
+
+    # Force correct UTF-8 declaration (PyRSS2Gen often defaults to iso-8859-1)
+    if '<?xml' in xml_str:
+        xml_str = xml_str.replace('encoding="iso-8859-1"', 'encoding="utf-8"', 1)
+    else:
+        xml_str = '<?xml version="1.0" encoding="utf-8"?>\n' + xml_str
+
+    with open(filename, "w", encoding="utf-8") as out:
+        out.write(xml_str)
+
+    logger.info(f"Updated {filename} with {len(items)} items (including fallback if needed)")
 
 async def process_category(category: str, last_run: datetime.datetime, seen_urls: set, client: GenerativeModel):
     sources = config['categories'][category]
@@ -253,19 +283,20 @@ async def process_category(category: str, last_run: datetime.datetime, seen_urls
                 continue
             content = await fetch_url_content(url)
             if content:
-                seen_urls.add(url)  # prevent reuse in same run
+                seen_urls.add(url)
                 short_title = (entry.title or "Untitled")[:80]
                 articles.append(f"Title: {short_title}\nURL: {url}\nPublished: {pub.isoformat()}\nContent: {content[:2200]}...\n---")
-
     if not articles:
+        logger.info(f"No new articles for {category}")
         return []
-
     prompt = GENERAL_INSTRUCTION_TEMPLATE.format(
         omit_categories=OMIT_CATEGORIES,
         articles='\n'.join(articles)
     )
     result = get_ai_response(client, prompt)
-    return result.get('themes', [])
+    themes = result.get('themes', [])
+    logger.info(f"Generated {len(themes)} themes for {category}")
+    return themes
 
 async def process_social_pulse(last_run: datetime.datetime, seen_urls: set, client: GenerativeModel):
     sources = config['categories']['general']
@@ -284,13 +315,14 @@ async def process_social_pulse(last_run: datetime.datetime, seen_urls: set, clie
             content = await fetch_url_content(url)
             if content:
                 signals.append(f"Discussion signal from {url}:\nTitle: {entry.title}\nExcerpt: {content[:800]}...\n---")
-
-    if len(signals) < 2:  # need enough signal mass
+    if len(signals) < 2:
+        logger.info("Insufficient signals for Social Pulse")
         return []
-
     prompt = SOCIAL_PULSE_INSTRUCTION_TEMPLATE.format(social_signals='\n'.join(signals))
     result = get_ai_response(client, prompt)
-    return result.get('themes', [])
+    themes = result.get('themes', [])
+    logger.info(f"Generated {len(themes)} Social Pulse themes")
+    return themes
 
 async def main():
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -302,19 +334,16 @@ async def main():
 
     seen_urls = get_seen_urls()
 
-    # Initialize Gemini client
     client = GenerativeModel('gemini-1.5-pro-latest')  # adjust model as needed
 
     for category in config['categories']:
         themes = await process_category(category, last_run, seen_urls, client)
         update_xml_feed(category, themes, now)
 
-    # Social Pulse (only once, added to general)
     pulse_themes = await process_social_pulse(last_run, seen_urls, client)
     if pulse_themes:
         update_xml_feed('general', pulse_themes, now)
 
-    # Update state
     with open(STATE_PATH, 'w', encoding='utf-8') as f:
         f.write(now.isoformat())
 
