@@ -1,16 +1,23 @@
-blocked_content:
-  - celebrity gossip
-  - sports betting
-  - \bporn\b
+content_filters:
+  omit_categories:
+    - "Sports: Any professional or amateur sports news."
+    - "Tabloid/Gossip: Celebrity or sensationalist content."
+    - "Tragedy/Crime: Individual crimes or accidents."
+    - "Low-Value: Listicles, ads, press releases."
 
 categories:
-  tech_news:
+  general:
     rss:
-      - https://techcrunch.com/feed/
       - https://news.ycombinator.com/rss
-    urls:
-      - https://example.com/daily-blog-post
-  ai_updates:
+      - https://www.reddit.com/r/worldnews/.rss
+    urls: []
+
+  culture:
     rss:
-      - https://openai.com/blog/rss.xml
+      - https://www.newyorker.com/feed/culture
+    urls: []
+
+  science:
+    rss:
+      - https://www.sciencemag.org/rss/news_current.xml
     urls: []
