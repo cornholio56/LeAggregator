@@ -6,20 +6,20 @@ import json
 import logging
 import datetime
 import hashlib
-import html  # ← Added for escaping
 import PyRSS2Gen
 import trafilatura
 import xml.etree.ElementTree as ET
-from google.generativeai import GenerativeModel, GenerationConfig
+import google.generativeai as genai
 from google.generativeai.types import HarmCategory, HarmBlockThreshold
-from newspaper import Article
+from newspaper import Article, Config
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
 from dateutil import parser as date_parser
 from xml.dom.minidom import parseString
+import time
 
 CONFIG_PATH = "sources.yaml"
 STATE_PATH = "read_log.txt"
-BASE_REPO_URL = "https://github.com/USER/REPO"  # ← replace with actual repo
+BASE_REPO_URL = "https://github.com/cornholio56/LeAggregator"  # ← your actual repo
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ RULES:
 - Output only high-confidence themes (prefer omission over weak or uncertain ones).
 - Be factual, analytical, and neutral; no speculation or opinion.
 - Titles: 5–10 words, concise and thematic.
-- Use this exact HTML format for each Story's content (repeat blocks for sub-themes):
+- Use this exact HTML format for each Story's content:
 
 <div>
   <p>Intro paragraph (2–3 sentences explaining relevance and context)</p>
@@ -57,8 +57,7 @@ ARTICLES (each separated by ---):
 Output ONLY valid JSON:
 {{
   "themes": [
-    {{"title": "Story title", "expanded_html": "<div>...</div>"}},
-    ...
+    {{"title": "Story title", "expanded_html": "<div>...</div>"}}
   ]
 }}
 """
@@ -96,8 +95,8 @@ RESPONSE_SCHEMA = {
                     "expanded_html": {"type": "STRING"}
                 },
                 "required": ["title", "expanded_html"]
-            },
-            "minItems": 0
+            }
+            # minItems removed → fixes Gemini schema validation error
         }
     },
     "required": ["themes"]
@@ -128,40 +127,64 @@ def get_seen_urls():
     return seen
 
 async def fetch_url_content(url: str) -> str | None:
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9,hr;q=0.8',
+    }
+
     for attempt in range(3):
         try:
-            downloaded = trafilatura.fetch_url(url)
-            text = trafilatura.extract(downloaded, include_links=False)
-            if text and len(text) > 600:
-                return text
-        except:
-            pass
+            # 1. Trafilatura with custom headers
+            downloaded = trafilatura.fetch_url(url, decode=True, headers=headers)
+            if downloaded:
+                text = trafilatura.extract(downloaded, include_links=False)
+                if text and len(text.strip()) > 600:
+                    logger.info(f"Trafilatura success: {url}")
+                    return text
+        except Exception as e:
+            logger.debug(f"Trafilatura attempt {attempt+1} failed: {e}")
+
         try:
-            article = Article(url, fetch_images=False)
+            # 2. Newspaper3k fallback
+            n_config = Config()
+            n_config.browser_user_agent = headers['User-Agent']
+            article = Article(url, config=n_config, fetch_images=False)
             article.download()
             article.parse()
             if len(article.text) > 600:
+                logger.info(f"Newspaper success: {url}")
                 return article.text
-        except:
-            pass
+        except Exception as e:
+            logger.debug(f"Newspaper attempt {attempt+1} failed: {e}")
+
         try:
+            # 3. Crawl4AI (strongest anti-bot)
             async with AsyncWebCrawler(config=BrowserConfig(headless=True, verbose=False)) as crawler:
                 result = await crawler.arun(
                     url=url,
-                    config=CrawlerRunConfig(cache_mode=CacheMode.BYPASS, word_count_threshold=150)
+                    config=CrawlerRunConfig(
+                        cache_mode=CacheMode.BYPASS,
+                        word_count_threshold=150,
+                        user_agent=headers['User-Agent']
+                    )
                 )
-                if result.success and result.markdown and len(result.markdown) > 600:
+                if result.success and result.markdown and len(result.markdown.strip()) > 600:
+                    logger.info(f"Crawl4AI success: {url}")
                     return result.markdown
-        except:
-            pass
-    logger.warning(f"Failed to fetch content from {url} after 3 attempts")
+        except Exception as e:
+            logger.debug(f"Crawl4AI attempt {attempt+1} failed: {e}")
+
+        time.sleep(1.5)  # polite backoff
+
+    logger.warning(f"All fetch methods failed for {url}")
     return None
 
-def get_ai_response(client: GenerativeModel, prompt: str) -> dict:
+def get_ai_response(model, prompt: str) -> dict:
     try:
-        response = client.generate_content(
+        response = model.generate_content(
             contents=prompt,
-            generation_config=GenerationConfig(
+            generation_config=genai.GenerationConfig(
                 response_mime_type="application/json",
                 response_schema=RESPONSE_SCHEMA,
                 temperature=0.1,
@@ -175,7 +198,7 @@ def get_ai_response(client: GenerativeModel, prompt: str) -> dict:
         )
         return json.loads(response.text)
     except Exception as e:
-        logger.error(f"Gemini error: {e}")
+        logger.error(f"Gemini error: {str(e)}")
         return {"themes": []}
 
 def load_existing_items(category: str, cutoff: datetime.datetime):
@@ -211,31 +234,14 @@ def update_xml_feed(category: str, new_themes: list, now: datetime.datetime):
     items = load_existing_items(category, cutoff)
 
     for theme in new_themes:
-        # Escape potentially dangerous characters in user/AI-generated HTML content
-        safe_title = html.escape(theme["title"])
-        safe_html = theme["expanded_html"]  # Assume AI outputs safe HTML; if not, escape inner text too
-        content_hash = hashlib.sha256(safe_html.encode('utf-8')).hexdigest()
-        guid_str = f"{category}-{content_hash}"
-
+        content_hash = hashlib.sha256(theme['expanded_html'].encode('utf-8')).hexdigest()
+        guid_str = f"{category}-{content_hash[:16]}"
         items.append(
             PyRSS2Gen.RSSItem(
-                title=safe_title,
+                title=theme["title"],
                 link=BASE_REPO_URL,
-                description=safe_html,
+                description=theme["expanded_html"],
                 guid=PyRSS2Gen.Guid(guid_str, isPermaLink=False),
-                pubDate=now
-            )
-        )
-
-    # Fallback if no items at all (prevents "empty feed" rejection)
-    if not items:
-        logger.info(f"No stories for {category}; adding placeholder item")
-        items.append(
-            PyRSS2Gen.RSSItem(
-                title="No recent thematic stories",
-                link=BASE_REPO_URL,
-                description="<div><p>No new high-confidence AI-curated themes in the last run. Check back after the next update (every 4 hours).</p></div>",
-                guid=PyRSS2Gen.Guid(f"{category}-placeholder-{now.isoformat()}", isPermaLink=False),
                 pubDate=now
             )
         )
@@ -250,24 +256,10 @@ def update_xml_feed(category: str, new_themes: list, now: datetime.datetime):
         items=items
     )
 
-    # Write to StringIO first to control XML declaration
-    from io import StringIO
-    f = StringIO()
-    rss.write_xml(f, encoding='utf-8')  # Try utf-8 here
-    xml_str = f.getvalue()
+    with open(filename, "w", encoding="utf-8") as f:
+        rss.write_xml(f)
 
-    # Force correct UTF-8 declaration (PyRSS2Gen often defaults to iso-8859-1)
-    if '<?xml' in xml_str:
-        xml_str = xml_str.replace('encoding="iso-8859-1"', 'encoding="utf-8"', 1)
-    else:
-        xml_str = '<?xml version="1.0" encoding="utf-8"?>\n' + xml_str
-
-    with open(filename, "w", encoding="utf-8") as out:
-        out.write(xml_str)
-
-    logger.info(f"Updated {filename} with {len(items)} items (including fallback if needed)")
-
-async def process_category(category: str, last_run: datetime.datetime, seen_urls: set, client: GenerativeModel):
+async def process_category(category: str, last_run: datetime.datetime, seen_urls: set, model):
     sources = config['categories'][category]
     articles = []
     for rss_url in sources.get('rss', []):
@@ -286,19 +278,18 @@ async def process_category(category: str, last_run: datetime.datetime, seen_urls
                 seen_urls.add(url)
                 short_title = (entry.title or "Untitled")[:80]
                 articles.append(f"Title: {short_title}\nURL: {url}\nPublished: {pub.isoformat()}\nContent: {content[:2200]}...\n---")
+
     if not articles:
-        logger.info(f"No new articles for {category}")
         return []
+
     prompt = GENERAL_INSTRUCTION_TEMPLATE.format(
         omit_categories=OMIT_CATEGORIES,
         articles='\n'.join(articles)
     )
-    result = get_ai_response(client, prompt)
-    themes = result.get('themes', [])
-    logger.info(f"Generated {len(themes)} themes for {category}")
-    return themes
+    result = get_ai_response(model, prompt)
+    return result.get('themes', [])
 
-async def process_social_pulse(last_run: datetime.datetime, seen_urls: set, client: GenerativeModel):
+async def process_social_pulse(last_run: datetime.datetime, seen_urls: set, model):
     sources = config['categories']['general']
     signals = []
     for rss_url in sources.get('rss', []):
@@ -315,14 +306,13 @@ async def process_social_pulse(last_run: datetime.datetime, seen_urls: set, clie
             content = await fetch_url_content(url)
             if content:
                 signals.append(f"Discussion signal from {url}:\nTitle: {entry.title}\nExcerpt: {content[:800]}...\n---")
+
     if len(signals) < 2:
-        logger.info("Insufficient signals for Social Pulse")
         return []
+
     prompt = SOCIAL_PULSE_INSTRUCTION_TEMPLATE.format(social_signals='\n'.join(signals))
-    result = get_ai_response(client, prompt)
-    themes = result.get('themes', [])
-    logger.info(f"Generated {len(themes)} Social Pulse themes")
-    return themes
+    result = get_ai_response(model, prompt)
+    return result.get('themes', [])
 
 async def main():
     now = datetime.datetime.now(datetime.timezone.utc)
@@ -334,16 +324,27 @@ async def main():
 
     seen_urls = get_seen_urls()
 
-    client = GenerativeModel('gemini-1.5-pro-latest')  # adjust model as needed
+    # Modern Gemini initialization
+    genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
+    model = genai.GenerativeModel(
+        model_name="gemini-1.5-flash-002",  # or gemini-1.5-pro-002 if quota allows
+        generation_config=genai.GenerationConfig(
+            temperature=0.1,
+            top_p=0.95,
+            max_output_tokens=2048
+        )
+    )
 
     for category in config['categories']:
-        themes = await process_category(category, last_run, seen_urls, client)
+        themes = await process_category(category, last_run, seen_urls, model)
         update_xml_feed(category, themes, now)
 
-    pulse_themes = await process_social_pulse(last_run, seen_urls, client)
+    # Social Pulse → only added to general
+    pulse_themes = await process_social_pulse(last_run, seen_urls, model)
     if pulse_themes:
         update_xml_feed('general', pulse_themes, now)
 
+    # Update last run time
     with open(STATE_PATH, 'w', encoding='utf-8') as f:
         f.write(now.isoformat())
 
