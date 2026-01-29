@@ -1,8 +1,9 @@
-pyyaml
 feedparser
-google-genai
 PyRSS2Gen
-requests
-newspaper3k
+pyyaml
 python-dateutil
-lxml[html_clean]
+trafilatura
+newspaper3k
+crawl4ai
+playwright
+google-generativeai
